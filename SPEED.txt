@@ -1,0 +1,274 @@
+REM Acorn Electron speed tricks
+REM Copyright (C) 2022 0xC0DE (@0xC0DE6502)
+REM Aug 2022
+
+REM Speed tricks demonstrated in this program:
+REM * Disable the Plus1 expansion (if it is fitted)
+REM * Disable keyboard scanning by the operating system (MOS)
+REM * Disable the entire MOS
+REM * Switch to a faster screen MODE from the end of the screen
+REM   right up to scanline 100, displaying only scanlines 101..256
+REM   in the selected (slower) screen MODE
+REM * Combine the screen MODE switch with disabling the keyboard
+REM * Combine the screen MODE switch with disabling the MOS
+REM   This is the fastest option and used in games that only use the
+REM   bottom part of the screen (scanlines 101..256), perform their
+REM   own hardware key scanning, and code their own sound/music routines.
+REM   Then you hide the top part of the screen (blank palette)
+REM   and use the extra screen RAM that is now available to you.
+
+MODE1: REM Select any screen MODE you want here
+
+REM Disable ESCAPE so we don't interrupt the test program
+*FX200,1
+
+PRINT
+
+PRINT"Electron speed tricks in MODE ";?&355: REM Show selected screen MODE
+PRINT"Written by 0xC0DE (@0xC0DE6502)"
+
+PRINT
+
+*TAPE
+plus1=FNhas_plus1: REM Is the Plus1 expansion fitted?
+DIM M% 512: REM Reserve enough space for our assembly program
+PROCasm(M%): REM Initialise the assembly program
+CALLinit_irq_handler: REM Install our own IRQ1 handler
+
+F%=@%
+@%=&20205: REM Custom number formatting
+tab=28
+
+REM If a Plus1 is detected, run the extra test and then disable the Plus1
+IFplus1:PROCtest_plus1:PROCdisable_plus1:PRINT
+
+REM Plus1 is not fitted or disabled now
+REM Run a simple FOR-loop and measure the time it takes
+PRINT"Test: normal (w/o Plus1)";
+!time=0: REM We can't always use TIME, so we do our own time keeping
+FORK%=1TO10000:NEXT
+T=!time/100: REM Convert to seconds
+PRINTTAB(tab)T
+
+PRINT
+
+PRINT"Test: keyboard off";
+?&242=0: REM Disable MOS keyboard scanning; same as *FX178,0,0
+!time=0
+FORK%=1TO10000:NEXT
+T=!time/100
+?&242=255: REM Enable MOS keyboard scanning; same as *FX178,255,0
+PRINTTAB(tab)T
+
+PRINT
+
+REM Kicking the MOS out effectively means handling interrupts yourself
+REM You will also have to do your own hardware key scanning and sound generation
+PRINT"Test: MOS out";
+?mos_out=1: REM Tells our asm program that we shouldn't enter MOS
+!time=0
+FORK%=1TO10000:NEXT
+T=!time/100
+?mos_out=0: REM MOS is allowed back in again ;)
+PRINTTAB(tab)T
+
+PRINT
+
+REM Switching to a faster screen MODE during part or whole of the time,
+REM greatly speeds up your program in slow screen MODEs 0/1/2/3
+REM In this case we switch to MODE 6 upon the VSYNC interrupt at the end of the screen
+REM And we switch back to the selected MODE upon the RTC interrupt (at scanline 100)
+PRINT"Test: MODE switch";
+?mode_switch=1: REM Tells our asm program to enable the screen MODE switching
+!time=0
+FORK%=1TO10000:NEXT
+T=!time/100
+?mode_switch=0
+PRINTTAB(tab)T
+
+PRINT
+
+REM This simply combines the 'MODE switch' and 'keyboard off' tricks
+PRINT"Test: MODE switch + kbd off";
+?mode_switch=1
+?&242=0
+!time=0
+FORK%=1TO10000:NEXT
+T=!time/100
+?mode_switch=0
+?&242=255
+PRINTTAB(tab)T
+
+PRINT
+
+REM This simply combines the 'MODE switch' and 'MOS out' tricks
+REM This is the fastest available option
+PRINT"Test: MODE switch + MOS out";
+?mode_switch=1
+?mos_out=1
+!time=0
+FORK%=1TO10000:NEXT
+T=!time/100
+?mode_switch=0
+?mos_out=0
+PRINTTAB(tab)T
+
+PRINT
+
+CALLexit_irq_handler: REM Uninstall our own IRQ1 handler and clean up
+
+@%=F%: REM Restore original number formatting
+
+IFplus1:PROCenable_plus1: REM Re-enable the Plus1 if it was previously disabled
+
+REM Make ESCAPE function again
+*FX200,0
+
+END
+
+REM #############################################################
+
+DEFPROCasm(M%)
+FORp=0TO2STEP2
+P%=M%
+[OPTp
+\ Install our custom IRQ1 handler that responds to VSYNC and RTC interrupts
+.init_irq_handler
+  php
+  sei
+  lda &204
+  sta irq1v+0
+  lda &205
+  sta irq1v+1 \ Save original IRQ1 vector
+  lda #irq_handler MOD 256
+  sta &204
+  lda #irq_handler DIV 256
+  sta &205 \ Install our own IRQ1 handler
+  plp
+  rts
+
+\ Uninstall our custom IRQ1 handler
+\ Also switches back to the original screen MODE (just in case)
+.exit_irq_handler
+  php
+  sei
+  lda irq1v+0
+  sta &204
+  lda irq1v+1
+  sta &205 \ restore original IRQ1 vector
+
+  lda &355 \ get screen MODE according to MOS
+  asl A
+  asl A
+  asl A
+  ora #&80
+  sta &FE07 \ restore original screen MODE
+  plp
+  rts
+
+\ Our custom IRQ1 handler does the following things:
+\ 1. Update our own 100Hz timer for measuring our tests
+\ 2. Switch to screen MODE 6 upon VSYNC interrupt at scanline 256 (depends on the mode_switch variable)
+\ 3. Switch to the selected (original) screen MODE upon RTC interrupt at scanline 100 (depends on the mode_switch variable)
+\ 4. Pass control to the MOS IRQ1 handler or don't (depends on the mos_out variable)
+.irq_handler
+  lda &FE00
+  and #4 \ VSYNC interrupt detected?
+  beq chk_rtc
+
+  \ yes, VSYNC interrupt
+  \ first, update our own 100Hz timer
+  inc time+0
+  bne no_inc_time_hi1
+  inc time+1
+.no_inc_time_hi1  
+
+  lda mode_switch \ is MODE switch enabled?
+  beq irq_end
+  lda #&B0 \ MODE 6 (or use MODE 4 or 5)
+  sta &FE07
+  bne irq_end \ jump always
+
+.chk_rtc
+  lda &FE00
+  and #8 \ RTC interrupt enabled?
+  beq irq_end
+
+  \ yes, RTC interrupt
+  \ first, update our own 100Hz timer 
+  inc time+0
+  bne no_inc_time_hi2
+  inc time+1
+.no_inc_time_hi2
+
+  lda mode_switch \ is MODE switch enabled?
+  beq irq_end
+  lda &355 \ original screen MODE according to MOS
+  asl A
+  asl A
+  asl A
+  ora #&80
+  sta &FE07 \ restore original MODE
+
+  \ fall through to irq_end
+
+.irq_end
+  lda mos_out \ do we pass control to MOS or not?
+  beq mos
+
+  \ no, keep MOS out, clear interrupts and return to BBC BASIC
+  lda #32+16
+  sta &FE05 \ acknowledge/clear VSYNC and RTC interrupts
+  lda &FC
+  rti
+
+.mos
+  jmp (irq1v) \ yes, MOS is in play, jump to its IRQ1 handler
+
+\ Variables
+.time EQUD 0 \ 100Hz timer, only the 2 least significant bytes are used
+.irq1v EQUW 0 \ Stores the original IRQ1 vector 
+.mode_switch EQUB 0 \ Keeps track of whether speed trick 'MODE switch' is enabled or not
+.mos_out EQUB 0 \ Keeps track of whether speed trick 'MOS out' is enabled or not
+]:NEXTp
+ENDPROC
+
+REM Disable the Plus1 expansion
+REM Should only be called if we have detected the Plus1 previously! (see FNhas_plus1)
+DEFPROCdisable_plus1
+  REM Disable the Plus1
+  *FX163,128,1
+  plus1_filev_lo=?&212
+  plus1_filev_hi=?&213: REM Save the FILEV contents
+  ?&212=&D6
+  ?&213=&F1: REM Set default FILEV
+  plus1_rom_type=?(&2A0+12): REM Remember the Plus1 ROM type
+  ?(&2A0+12)=0: REM Wipe the Plus1 from the ROM table
+ENDPROC
+
+REM Re-enable a previously disabled Plus1 expansion
+REM Should only be called if we have detected the Plus1 previously! (see FNhas_plus1)
+DEFPROCenable_plus1
+  ?&212=plus1_filev_lo
+  ?&213=plus1_filev_hi: REM Restore FILEV that matches the Plus1
+  ?(&2A0+12)=plus1_rom_type: REM Restore the entry in the ROM table
+  REM Re-enable the Plus1
+  *FX163,128,0
+ENDPROC
+
+REM Check if a Plus1 expansion is actually fitted to this Electron
+REM Returns TRUE (-1) if it is, FALSE (0) if it isn't
+DEFFNhas_plus1
+  A%=163
+  X%=128
+  Y%=0: REM Basically do a *FX163,128,0 (tries to enable the Plus1)
+=(((USR&FFF4)AND&FF00)DIV256)<>255
+
+REM Perform the speed test with the Plus1 enabled
+DEFPROCtest_plus1
+  PRINT"Test: normal (with Plus1)";
+  !time=0
+  FORK%=1TO10000:NEXT
+  T=!time/100
+  PRINTTAB(tab)T
+ENDPROC
