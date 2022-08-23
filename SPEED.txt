@@ -157,12 +157,8 @@ P%=M%
   lda irq1v+1
   sta &205 \ restore original IRQ1 vector
 
-  lda &355 \ get screen MODE according to MOS
-  asl A
-  asl A
-  asl A
-  ora #&80
-  sta &FE07 \ restore original screen MODE
+  lda &282
+  sta &FE07 \ restore original screen MODE, etc.
   plp
   rts
 
@@ -203,12 +199,8 @@ P%=M%
 
   lda mode_switch \ is MODE switch enabled?
   beq irq_end
-  lda &355 \ original screen MODE according to MOS
-  asl A
-  asl A
-  asl A
-  ora #&80
-  sta &FE07 \ restore original MODE
+  lda &282
+  sta &FE07 \ restore original screen MODE, etc.
 
   \ fall through to irq_end
 
